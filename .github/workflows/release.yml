@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Dependencies
+      run: |
+       export DEBIAN_FRONTEND="noninteractive"
+       sudo apt-get update
+       sudo apt-get install -y \
+         build-essential \
+         pkg-config \
+         libcurl4-openssl-dev \
+         libglib2.0-dev \
+         libpoppler-glib-dev \
+         libstb-dev \
+         libarchive-dev \
+         yq
+    
+    - name: Build
+      run: make
+      
+    - name: Parse Exams
+      run: bash release.sh
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-files
+        path: out/*
+      
+  release:
+      runs-on: ubuntu-latest
+      needs: build
+      steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-files
+      
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ./*
