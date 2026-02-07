@@ -1,11 +1,12 @@
+#include <archive.h>
+#include <archive_entry.h>
 #include <ctype.h>
+#include <curl/curl.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <math.h>
 #include <poppler/glib/poppler.h>
 #include <stdio.h>
-#include <archive.h>
-#include <archive_entry.h>
 #define STB_DS_IMPLEMENTATION
 #include "stb/stb_ds.h"
 
@@ -20,7 +21,7 @@ typedef struct {
   GString *answer2;
   GString *answer3;
   short int correct;
-  int has_image;
+  gboolean has_image;
 } Question;
 
 typedef enum {
@@ -40,13 +41,13 @@ typedef struct {
 
 typedef struct {
   int index;
-  int is_bold;
+  gboolean is_bold;
   gdouble font_size;
 } CharAttribute;
 
 Question *exam = NULL;
 
-int is_font_bold(gchar *fontName) {
+gboolean is_font_bold(gchar *fontName) {
   return (g_strstr_len(g_utf8_casefold(fontName, -1), -1,
                        g_utf8_casefold("bold", -1))) != NULL;
 }
@@ -55,7 +56,8 @@ int sort_characters(const void *a, const void *b) {
   CharPos *p1 = (CharPos *)a;
   CharPos *p2 = (CharPos *)b;
 
-  if (fabs(p1->y - p2->y) > 10) {
+  if (fabs(p1->y - p2->y) >
+      10) { // 10 is magic and if the code fails thay may be the reason
     if (p1->y < p2->y)
       return -1;
     if (p1->y > p2->y)
@@ -69,81 +71,144 @@ int sort_characters(const void *a, const void *b) {
   return 0;
 }
 
-gboolean zip_directory(const gchar *dir_path, const gchar *zip_path, GError **error) {
-    struct archive *a = archive_write_new();
-    archive_write_set_format_zip(a);
-    
-    if (archive_write_open_filename(a, zip_path) != ARCHIVE_OK) {
-        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
-                    "Failed to create zip: %s", archive_error_string(a));
-        archive_write_free(a);
-        return FALSE;
-    }
-    
-    GDir *dir = g_dir_open(dir_path, 0, error);
-    if (!dir) {
-        archive_write_free(a);
-        return FALSE;
-    }
-    
-    const gchar *name;
-    while ((name = g_dir_read_name(dir)) != NULL) {
-        gchar *filepath = g_build_filename(dir_path, name, NULL);
-        
-        GStatBuf st;
-        if (g_stat(filepath, &st) != 0) {
-            g_free(filepath);
-            continue;
-        }
-        
-        struct archive_entry *ae = archive_entry_new();
-        gchar *entry_path = g_build_filename("radioamator", name, NULL);
-        archive_entry_set_pathname(ae, entry_path);
-        archive_entry_set_size(ae, st.st_size);
-        archive_entry_set_filetype(ae, AE_IFREG);
-        archive_entry_set_perm(ae, 0644);
-        archive_write_header(a, ae);
-        
-        gchar *contents;
-        gsize length;
-        if (g_file_get_contents(filepath, &contents, &length, NULL)) {
-            archive_write_data(a, contents, length);
-            g_free(contents);
-        }
-        
-        g_free(entry_path);
-        archive_entry_free(ae);
-        g_free(filepath);
-    }
-    
-    g_dir_close(dir);
-    archive_write_close(a);
+gboolean zip_directory(const gchar *dir_path, const gchar *zip_path,
+                       GError **error) {
+  struct archive *a = archive_write_new();
+  archive_write_set_format_zip(a);
+
+  if (archive_write_open_filename(a, zip_path) != ARCHIVE_OK) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to create zip: %s", archive_error_string(a));
     archive_write_free(a);
-    
-    return TRUE;
+    return FALSE;
+  }
+  GDir *dir = g_dir_open(dir_path, 0, error);
+  if (!dir) {
+    archive_write_free(a);
+    return FALSE;
+  }
+
+  const gchar *name;
+  while ((name = g_dir_read_name(dir)) != NULL) {
+    gchar *filepath = g_build_filename(dir_path, name, NULL);
+    GStatBuf st;
+    if (g_stat(filepath, &st) != 0) {
+      g_free(filepath);
+      continue;
+    }
+
+    struct archive_entry *ae = archive_entry_new();
+    gchar *entry_path = g_build_filename("testownikradioamator", name, NULL);
+    archive_entry_set_pathname(ae, entry_path);
+    archive_entry_set_size(ae, st.st_size);
+    archive_entry_set_filetype(ae, AE_IFREG);
+    archive_entry_set_perm(ae, 0644);
+    archive_write_header(a, ae);
+
+    gchar *contents;
+    gsize length;
+    if (g_file_get_contents(filepath, &contents, &length, NULL)) {
+      archive_write_data(a, contents, length);
+      g_free(contents);
+    }
+
+    g_free(entry_path);
+    archive_entry_free(ae);
+    g_free(filepath);
+  }
+
+  g_dir_close(dir);
+  archive_write_close(a);
+  archive_write_free(a);
+  return TRUE;
+}
+
+size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+  size_t written = fwrite(ptr, size, nmemb, stream);
+  return written;
+}
+
+gchar *download_pdf(const gchar *url, GError **error) {
+  const gchar *tmp_dir = g_get_tmp_dir();
+  gchar *template = "radioamatorexamXXXXXX.pdf";
+  gchar *filename = g_build_filename(tmp_dir, template, NULL);
+  gint fd = g_mkstemp(filename);
+  if (fd == -1) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to create temp file");
+    return NULL;
+  }
+
+  CURL *curl = curl_easy_init();
+  if (!curl) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to initialize curl");
+    g_free(filename);
+    return NULL;
+  }
+
+  FILE *fp = fdopen(fd, "wb");
+  if (!fp) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+                "Failed to open temp file for writing");
+    curl_easy_cleanup(curl);
+    g_free(filename);
+    return NULL;
+  }
+
+  curl_easy_setopt(curl, CURLOPT_URL, url);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+  CURLcode res = curl_easy_perform(curl);
+  curl_easy_cleanup(curl);
+  fclose(fp);
+
+  if (res != CURLE_OK) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "Download failed: %s",
+                curl_easy_strerror(res));
+    g_unlink(filename);
+    g_free(filename);
+    return NULL;
+  }
+
+  gchar *result = g_strdup_printf("%s%s", "file://", filename);
+  g_free(filename);
+  return result;
 }
 
 int main(int argc, char **argv) {
-  if (argc < 3) {
-        g_printerr("Usage: %s <source> <target>\n", argv[0]);
-        return 1;
-    }
-    const gchar *source = argv[1];
-    const gchar *target = argv[2];
-
   GError *err = NULL;
-  PopplerDocument *doc = poppler_document_new_from_file(
-      source,
-      NULL, &err);
+  if (argc < 3) {
+    g_printerr("Usage: %s <source> <target>\n", argv[0]);
+    return 1;
+  }
+  gboolean pdf_is_temp = FALSE;
+  char *source = argv[1];
+  const char *target = argv[2];
+
+  if (g_str_has_prefix(source, "http")) {
+    source = download_pdf(source, &err);
+    pdf_is_temp = TRUE;
+    if (!source) {
+      g_printerr("Error: %s\n", err->message);
+      g_error_free(err);
+      return 1;
+    }
+  } else if (!g_str_has_prefix(source, "file")) {
+    perror("Source should be either http or file schema uri");
+    return 1;
+  }
+
+  PopplerDocument *doc = poppler_document_new_from_file(source, NULL, &err);
   if (!doc) {
     g_printerr("Error: %s\n", err->message);
     g_error_free(err);
     return 1;
   }
 
-  const gchar *TMP_DIR = g_get_tmp_dir();
+  const gchar *tmp_dir = g_get_tmp_dir();
   char *exam_dir =
-      g_mkdtemp(g_build_filename(TMP_DIR, "testownikradioamatorXXXXXX", NULL));
+      g_mkdtemp(g_build_filename(tmp_dir, "testownikradioamatorXXXXXX", NULL));
   if (exam_dir == NULL) {
     perror("Failed to create temporary exam directory");
     return 1;
@@ -166,6 +231,8 @@ int main(int argc, char **argv) {
     PopplerRectangle *rectangles;
     guint chars_total;
     poppler_page_get_text_layout(page, &rectangles, &chars_total);
+
+    // ---------- SORT THE TEXT AND ATTRIBUTES
 
     CharPos *positions = malloc(chars_total * sizeof(CharPos));
     int *reverse_index_map = malloc(chars_total * sizeof(int));
@@ -221,7 +288,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    // ---------- ITERATION THROUGH THE TEXT
+    // ---------- ITERATE THROUGH THE TEXT
 
     gchar *gc = sorted->str;
     int ignore = 0;
@@ -241,9 +308,10 @@ int main(int argc, char **argv) {
       gint clen = g_unichar_to_utf8(c, cbuf);
 
       if (g_str_has_prefix(gc, qp)) {
-        arrput(exam, ((Question){arrlen(exam), (int)positions[i].y,
-                                 g_string_new(""), g_string_new(""),
-                                 g_string_new(""), g_string_new(""), 0, 0}));
+        arrput(exam,
+               ((Question){arrlen(exam), (int)positions[i].y, g_string_new(""),
+                           g_string_new(""), g_string_new(""), g_string_new(""),
+                           0, FALSE}));
         ignore = (int)log10(current_question) + 3;
         mode = QUESTION;
         current_question++;
@@ -295,7 +363,7 @@ int main(int argc, char **argv) {
       previous_font_size = attributes[i].font_size;
     }
 
-    // ---------- ITERATION THROUGH THE IMAGES / IMAGES EXPORT
+    // ---------- ITERATE THROUGH / EXPORT IMAGES
 
     for (GList *l = image_mapping; l != NULL; l = l->next) {
       PopplerImageMapping *m = l->data;
@@ -306,17 +374,17 @@ int main(int argc, char **argv) {
         if (i == page_first_qi) {
           if (exam[i].y > iy) {
             if (i > 0) {
-              exam[i - 1].has_image = 1;
+              exam[i - 1].has_image = TRUE;
               img_question = exam[i - 1].number;
               break;
             }
           }
         } else if (exam[i - 1].y < iy && exam[i].y > iy) {
-          exam[i - 1].has_image = 1;
+          exam[i - 1].has_image = TRUE;
           img_question = exam[i - 1].number;
           break;
         } else if (i == arrlen(exam) - 1 && exam[i].y < iy) {
-          exam[i].has_image = 1;
+          exam[i].has_image = TRUE;
           img_question = exam[i].number;
         }
       }
@@ -334,11 +402,22 @@ int main(int argc, char **argv) {
     free(positions);
     free(reverse_index_map);
     g_free(rectangles);
+
+    poppler_page_free_image_mapping(image_mapping);
+    poppler_page_free_text_attributes(attrs);
+    g_free(text);
     g_object_unref(page);
   }
   g_object_unref(doc);
 
-  // ---------- FILE EXPORT
+  if (pdf_is_temp) {
+    gchar *path = g_filename_from_uri(source, NULL, NULL);
+    g_unlink(path);
+    g_free(path);
+    g_free(source);
+  }
+
+  // ---------- EXPORT QUESTIONS
 
   char answer_array[4];
   answer_array[3] = '\0';
@@ -373,8 +452,33 @@ int main(int argc, char **argv) {
     g_free(contents);
   }
 
-  zip_directory(exam_dir, target, &err);
+  gboolean zip_status = zip_directory(exam_dir, target, &err);
+  if (!zip_status) {
+    g_printerr("Error: %s\n", err->message);
+    g_error_free(err);
+  }
 
+  // ---------- CLEAR TEMP DIR
+
+  for (int i = 0; i < arrlen(exam); i++) {
+    Question q = exam[i];
+    gchar *name = g_strdup_printf("%03d.txt", q.number);
+    gchar *filename = g_build_filename(exam_dir, name, NULL);
+
+    if (q.has_image) {
+      gchar *name = g_strdup_printf("%03d.png", q.number);
+      gchar *filename = g_build_filename(exam_dir, name, NULL);
+      g_unlink(filename);
+      g_free(name);
+      g_free(filename);
+    }
+
+    g_unlink(filename);
+    g_free(name);
+    g_free(filename);
+  }
+
+  g_rmdir(exam_dir);
   g_free(exam_dir);
   return 0;
 }
