@@ -138,20 +138,23 @@ gchar *download_pdf(const gchar *url, GError **error) {
                 "Failed to create temp file");
     return NULL;
   }
+  close(fd);
 
   CURL *curl = curl_easy_init();
   if (!curl) {
     g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
                 "Failed to initialize curl");
+    g_unlink(filename);
     g_free(filename);
     return NULL;
   }
 
-  FILE *fp = fdopen(fd, "wb");
+  FILE *fp = fopen(filename, "wb");
   if (!fp) {
     g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
                 "Failed to open temp file for writing");
     curl_easy_cleanup(curl);
+    g_unlink(filename);
     g_free(filename);
     return NULL;
   }
