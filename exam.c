@@ -10,12 +10,31 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb/stb_ds.h"
 
-// read the pdf file with exam questions provided by UKE and convert it to WUST
+// read the pdf file with exam questions provided by UKE and convert it to
 // Testownik file format.
 
 typedef struct {
+  int index;
+  double x1;
+  double x2;
+  double y1;
+  double y2;
+} CharPos;
+
+static inline CharPos pos_scaled(CharPos pos, int scale) {
+  pos.x1 *= scale;
+  pos.x2 *= scale;
+  pos.y1 *= scale;
+  pos.y2 *= scale;
+  return pos;
+}
+
+typedef struct {
   int number;
-  int y;
+  CharPos q_pos;
+  CharPos a1_pos;
+  CharPos a2_pos;
+  CharPos a3_pos;
   GString *question;
   GString *answer1;
   GString *answer2;
@@ -24,24 +43,12 @@ typedef struct {
   gboolean has_image;
 } Question;
 
-typedef enum {
-  UNKNOWN,
-  QUESTION,
-  ANSWER1,
-  ANSWER2,
-  ANSWER3,
-  QUESTION_BODY
-} TextPart;
-
-typedef struct {
-  int index;
-  double x;
-  double y;
-} CharPos;
+typedef enum { UNKNOWN, QUESTION, ANSWER1, ANSWER2, ANSWER3 } TextPart;
 
 typedef struct {
   int index;
   gboolean is_bold;
+  gboolean is_underlined;
   gdouble font_size;
 } CharAttribute;
 
@@ -52,21 +59,101 @@ gboolean is_font_bold(gchar *fontName) {
                        g_utf8_casefold("bold", -1))) != NULL;
 }
 
+gboolean is_answer(int ax) {
+  const int THRESHOLD = 5;
+  static int counter = 0;
+  static int sum = 0;
+  if (counter == 0) {
+    sum = ax;
+    counter++;
+    return TRUE;
+  } else if (abs((sum / counter) - ax) < THRESHOLD) {
+    sum += ax;
+    counter++;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+gboolean is_question(int qx) {
+  const int THRESHOLD = 5;
+  static int counter = 0;
+  static int sum = 0;
+  if (counter == 0) {
+    sum = qx;
+    counter++;
+    return TRUE;
+  } else if (abs((sum / counter) - qx) < THRESHOLD) {
+    sum += qx;
+    counter++;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+gboolean is_close(int font_size, TextPart m, CharPos *p1) {
+  static TextPart lm = UNKNOWN;
+  static CharPos *lp = NULL;
+  if (lp == NULL || m != lm) {
+    lm = m;
+    lp = p1;
+    return TRUE;
+  }
+  return (abs(p1->x1 - lp->x2) < font_size * 3 ||
+          abs(p1->y2 - lp->y2) < font_size * 3);
+}
+
+gboolean is_underlined_answer(cairo_surface_t *surface, CharPos a_pos) {
+
+  int stride = cairo_image_surface_get_stride(surface);
+  unsigned char *data = cairo_image_surface_get_data(surface);
+
+  int min_width = (int)((a_pos.x2 - a_pos.x1) * 0.95);
+
+  int y_h = a_pos.y2 - a_pos.y1;
+  for (int y = a_pos.y1; y < a_pos.y2 + y_h / 2; y++) {
+    unsigned char *row = data + (y * stride);
+    int consecutive_black = 0;
+
+    for (int x = a_pos.x1; x < a_pos.x2; x++) {
+      unsigned char *pixel = row + (x * 4); // BGRA
+      unsigned char b = pixel[0];
+      unsigned char g = pixel[1];
+      unsigned char r = pixel[2];
+      int thresh = 200;
+      int is_black = (r < thresh && g < thresh && b < thresh);
+
+      if (is_black) {
+        consecutive_black++;
+      } else {
+        if (consecutive_black >= min_width) {
+          return TRUE;
+        }
+        consecutive_black = 0;
+      }
+    }
+    if (consecutive_black >= min_width) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 int sort_characters(const void *a, const void *b) {
   CharPos *p1 = (CharPos *)a;
   CharPos *p2 = (CharPos *)b;
+  int THRESHOLD = 10;
 
-  if (fabs(p1->y - p2->y) >
-      10) { // 10 is magic and if the code fails thay may be the reason
-    if (p1->y < p2->y)
+  if (fabs(p1->y2 - p2->y2) > THRESHOLD) {
+    if (p1->y2 < p2->y2)
       return -1;
-    if (p1->y > p2->y)
+    if (p1->y2 > p2->y2)
       return 1;
   }
 
-  if (p1->x < p2->x)
+  if (p1->x2 < p2->x2)
     return -1;
-  if (p1->x > p2->x)
+  if (p1->x2 > p2->x2)
     return 1;
   return 0;
 }
@@ -160,6 +247,7 @@ gchar *download_pdf(const gchar *url, GError **error) {
   }
 
   curl_easy_setopt(curl, CURLOPT_URL, url);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
   CURLcode res = curl_easy_perform(curl);
@@ -224,19 +312,39 @@ int main(int argc, char **argv) {
 
   for (int p = 0; p < page_count; p++) {
     PopplerPage *page = poppler_document_get_page(doc, p);
-    GList *attrs = poppler_page_get_text_attributes(page);
+
+    PopplerRectangle *rectangles;
+    guint chars_total;
+    poppler_page_get_text_layout(page, &rectangles, &chars_total);
+    if (chars_total == 0) {
+      g_object_unref(page);
+      continue;
+    }
+
     char *text = poppler_page_get_text(page);
+    GList *attrs = poppler_page_get_text_attributes(page);
     GList *image_mapping = poppler_page_get_image_mapping(page);
 
     double page_width, page_height;
     poppler_page_get_size(page, &page_width, &page_height);
 
-    PopplerRectangle *rectangles;
-    guint chars_total;
-    poppler_page_get_text_layout(page, &rectangles, &chars_total);
+    double render_scale = 3;
+
+    cairo_surface_t *surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32, (int)page_width * render_scale,
+        (int)page_height * render_scale);
+    cairo_t *cr = cairo_create(surface);
+
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    cairo_paint(cr);
+    cairo_scale(cr, render_scale, render_scale);
+    poppler_page_render(page, cr);
+    cairo_destroy(cr);
 
     // ---------- SORT THE TEXT AND ATTRIBUTES
 
+    // https://stackoverflow.com/a/2740095
+    // pdfs text order can be different from rendered order
     CharPos *positions = malloc(chars_total * sizeof(CharPos));
     int *reverse_index_map = malloc(chars_total * sizeof(int));
     // PopplerTextAttributes are grouped, this array holds separated attributes
@@ -244,14 +352,12 @@ int main(int argc, char **argv) {
     CharAttribute *attributes = malloc(chars_total * sizeof(CharAttribute));
     int page_first_qi = (int)arrlen(exam);
 
-    // https://stackoverflow.com/a/2740095
-    // pdfs text order can be different from rendered order
     for (int i = 0; i < chars_total; i++) {
       positions[i].index = i;
-      positions[i].x = rectangles[i].x2;
-      // upper coord seems to be independent of char, while the lower is (spaces
-      // are affected)
-      positions[i].y = rectangles[i].y2;
+      positions[i].x1 = rectangles[i].x1;
+      positions[i].x2 = rectangles[i].x2;
+      positions[i].y1 = rectangles[i].y1;
+      positions[i].y2 = rectangles[i].y2;
     }
 
     // rebuild text in reading order
@@ -268,12 +374,12 @@ int main(int argc, char **argv) {
     }
 
     // break down attributes to single characters
-    // only works if they do not overlap (they don't)
     for (GList *l = attrs; l; l = l->next) {
       PopplerTextAttributes *a = l->data;
       for (int i = a->start_index; i < a->end_index + 1; i++) {
         attributes[i].index = i;
         attributes[i].is_bold = is_font_bold(a->font_name);
+        attributes[i].is_underlined = a->is_underlined;
         attributes[i].font_size = a->font_size;
       }
     }
@@ -297,7 +403,7 @@ int main(int argc, char **argv) {
     int ignore = 0;
     for (int i = 0; i < chars_total; i++) {
       if (previous_font_size < attributes[i].font_size &&
-          attributes[i].is_bold) {
+          attributes[i].is_bold && mode == ANSWER3) {
         // change of category
         current_question = 1;
         mode = UNKNOWN;
@@ -310,23 +416,29 @@ int main(int argc, char **argv) {
       gchar cbuf[6];
       gint clen = g_unichar_to_utf8(c, cbuf);
 
-      if (g_str_has_prefix(gc, qp)) {
-        arrput(exam,
-               ((Question){arrlen(exam), (int)positions[i].y, g_string_new(""),
-                           g_string_new(""), g_string_new(""), g_string_new(""),
-                           0, FALSE}));
-        ignore = (int)log10(current_question) + 3;
+      if (g_str_has_prefix(gc, qp) && is_question(positions[i].x1)) {
+        arrput(exam, ((Question){arrlen(exam), positions[i], positions[i],
+                                 positions[i], positions[i], g_string_new(""),
+                                 g_string_new(""), g_string_new(""),
+                                 g_string_new(""), 0, FALSE}));
+        ignore = (int)log10(current_question) + 2;
         mode = QUESTION;
         current_question++;
-      } else if (g_str_has_prefix(gc, "a. ") && mode == QUESTION_BODY) {
-        ignore = 3;
+      } else if ((g_str_has_prefix(gc, "a.") || g_str_has_prefix(gc, "A.")) &&
+                 mode == QUESTION && is_answer(positions[i].x1)) {
+        ignore = 2;
         mode = ANSWER1;
-      } else if (g_str_has_prefix(gc, "b. ") && mode == ANSWER1) {
-        ignore = 3;
+        exam[arrlen(exam) - 1].a1_pos = positions[i + 3];
+      } else if ((g_str_has_prefix(gc, "b.") || g_str_has_prefix(gc, "B.")) &&
+                 mode == ANSWER1 && is_answer(positions[i].x1)) {
+        ignore = 2;
         mode = ANSWER2;
-      } else if (g_str_has_prefix(gc, "c. ") && mode == ANSWER2) {
-        ignore = 3;
+        exam[arrlen(exam) - 1].a2_pos = positions[i + 3];
+      } else if ((g_str_has_prefix(gc, "c.") || g_str_has_prefix(gc, "C.")) &&
+                 mode == ANSWER2 && is_answer(positions[i].x1)) {
+        ignore = 2;
         mode = ANSWER3;
+        exam[arrlen(exam) - 1].a3_pos = positions[i + 3];
       }
 
       if (ignore) {
@@ -335,30 +447,60 @@ int main(int argc, char **argv) {
         int qi = arrlen(exam) - 1;
         switch (mode) {
         case QUESTION:
-        case QUESTION_BODY:
-          g_string_append_len(exam[qi].question, cbuf, clen);
+          if (is_close(attributes[i].font_size, mode, &positions[i]))
+            g_string_append_len(exam[qi].question, cbuf, clen);
           break;
         case ANSWER1:
-          if (attributes[i].is_bold)
+          if (attributes[i].is_bold || attributes[i].is_underlined)
             exam[qi].correct = 0b100;
-          g_string_append_len(exam[qi].answer1, cbuf, clen);
+          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            g_string_append_len(exam[qi].answer1, cbuf, clen);
+            if (exam[qi].a1_pos.y2 == positions[i].y2) {
+              exam[qi].a1_pos.x2 = positions[i].x2;
+              // fallback, font doesn't carry information about underline,
+              // stroke is a separate pdf object
+              if (exam[qi].correct == 0 && strlen(exam[qi].answer1->str) >= 3 &&
+                  is_underlined_answer(
+                      surface, pos_scaled(exam[qi].a1_pos, render_scale))) {
+                exam[qi].correct = 0b100;
+              }
+            }
+          }
           break;
         case ANSWER2:
-          if (attributes[i].is_bold)
+          if (attributes[i].is_bold || attributes[i].is_underlined)
             exam[qi].correct = 0b010;
-          g_string_append_len(exam[qi].answer2, cbuf, clen);
+          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            g_string_append_len(exam[qi].answer2, cbuf, clen);
+            if (exam[qi].a2_pos.y2 == positions[i].y2) {
+              exam[qi].a2_pos.x2 = positions[i].x2;
+
+              if (exam[qi].correct == 0 && strlen(exam[qi].answer2->str) >= 3 &&
+                  is_underlined_answer(
+                      surface, pos_scaled(exam[qi].a2_pos, render_scale))) {
+                exam[qi].correct = 0b010;
+              }
+            }
+          }
           break;
         case ANSWER3:
-          if (attributes[i].is_bold)
+          if (attributes[i].is_bold || attributes[i].is_underlined)
             exam[qi].correct = 0b001;
-          g_string_append_len(exam[qi].answer3, cbuf, clen);
+          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            g_string_append_len(exam[qi].answer3, cbuf, clen);
+            if (exam[qi].a3_pos.y2 == positions[i].y2) {
+              exam[qi].a3_pos.x2 = positions[i].x2;
+
+              if (exam[qi].correct == 0 && strlen(exam[qi].answer3->str) >= 3 &&
+                  is_underlined_answer(
+                      surface, pos_scaled(exam[qi].a3_pos, render_scale))) {
+                exam[qi].correct = 0b001;
+              }
+            }
+          }
           break;
         case UNKNOWN:
         }
-      }
-
-      if (mode == QUESTION && (c == ':' || c == '?')) {
-        mode = QUESTION_BODY;
       }
 
       g_free(qp);
@@ -375,36 +517,40 @@ int main(int argc, char **argv) {
       int img_question = 0;
       for (int i = page_first_qi; i < arrlen(exam); i++) {
         if (i == page_first_qi) {
-          if (exam[i].y > iy) {
+          if (exam[i].q_pos.y2 > iy) {
             if (i > 0) {
               exam[i - 1].has_image = TRUE;
               img_question = exam[i - 1].number;
               break;
             }
           }
-        } else if (exam[i - 1].y < iy && exam[i].y > iy) {
+        } else if (exam[i - 1].q_pos.y2 < iy && exam[i].q_pos.y2 > iy) {
           exam[i - 1].has_image = TRUE;
           img_question = exam[i - 1].number;
           break;
-        } else if (i == arrlen(exam) - 1 && exam[i].y < iy) {
+        } else if (i == arrlen(exam) - 1 && exam[i].q_pos.y2 < iy) {
           exam[i].has_image = TRUE;
           img_question = exam[i].number;
         }
       }
 
-      gchar *name = g_strdup_printf("%03d.png", img_question);
-      gchar *filename = g_build_filename(exam_dir, name, NULL);
-      cairo_surface_t *img = poppler_page_get_image(page, m->image_id);
-      cairo_surface_write_to_png(img, filename);
-      cairo_surface_destroy(img);
-      g_free(filename);
-      g_free(name);
+      if (img_question > 0) {
+        gchar *name = g_strdup_printf("%03d.png", img_question);
+        gchar *filename = g_build_filename(exam_dir, name, NULL);
+        cairo_surface_t *img = poppler_page_get_image(page, m->image_id);
+        cairo_surface_write_to_png(img, filename);
+        cairo_surface_destroy(img);
+        g_free(filename);
+        g_free(name);
+      }
     }
 
     free(attributes);
     free(positions);
     free(reverse_index_map);
     g_free(rectangles);
+
+    cairo_surface_destroy(surface);
 
     poppler_page_free_image_mapping(image_mapping);
     poppler_page_free_text_attributes(attrs);
@@ -426,6 +572,13 @@ int main(int argc, char **argv) {
   answer_array[3] = '\0';
   for (int i = 0; i < arrlen(exam); i++) {
     Question q = exam[i];
+    g_strstrip(q.question->str);
+    g_strstrip(q.answer1->str);
+    g_strstrip(q.answer2->str);
+    g_strstrip(q.answer3->str);
+    if (q.correct == 0) {
+      continue;
+    }
     gchar *name = g_strdup_printf("%03d.txt", q.number);
     gchar *filename = g_build_filename(exam_dir, name, NULL);
 
@@ -476,11 +629,16 @@ int main(int argc, char **argv) {
       g_free(filename);
     }
 
+    g_string_free(q.question, TRUE);
+    g_string_free(q.answer1, TRUE);
+    g_string_free(q.answer2, TRUE);
+    g_string_free(q.answer3, TRUE);
     g_unlink(filename);
     g_free(name);
     g_free(filename);
   }
 
+  arrfree(exam);
   g_rmdir(exam_dir);
   g_free(exam_dir);
   return 0;

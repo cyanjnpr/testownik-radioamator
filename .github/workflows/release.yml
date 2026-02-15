@@ -52,7 +52,11 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
+          body: |
+           Pytania egzaminacyjne w formacie testownika. 
+           Autorem treści pytań egzaminacyjnych jest Urząd Komunikacji Elektronicznej.
           draft: true
+          make_latest: true
           files: ./*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

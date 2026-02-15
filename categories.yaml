@@ -1,2 +1,24 @@
-materialy_pomocnicze_kategoria_1: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_1.pdf"
-materialy_pomocnicze_kategoria_3: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_3.pdf"
+# Autorem treści pytań egzaminacyjnych jest Urząd Komunikacji Elektronicznej.
+
+# ================ 2023
+# Materiały pomocnicze od roku 2023.
+materialy_pomocnicze_kategoria_1_2023: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_1.pdf"
+materialy_pomocnicze_kategoria_3_2023: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_3.pdf"
+# Web Archive
+# materialy_pomocnicze_kategoria_1_2023: "https://web.archive.org/web/20260209002352if_/https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_1.pdf"
+# materialy_pomocnicze_kategoria_3_2023: "https://web.archive.org/web/20260209002424if_/https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/125/20/29/materialy_pomocnicze_kategoria_3.pdf"
+
+# ================ 2019
+# Materiały pomocnicze do roku 2023. Tylko niektóre pytania mają zaznaczone poprawne odpowiedzi.
+# Tylko pytania z zaznaczonymi odpowiedziami znajdą się w skompilowanym testowniku.
+# Create Date: 2019:09:25
+niektore_materialy_na_swiadectwo_klasy_A_2019: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/130/3/2/materialy_do_testu_na_swiadectwo_klasy_a.pdf"
+niektore_materialy_na_swiadectwo_klasy_C_2019: "https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/130/3/2/materialy_do_testu_na_swiadectwo_klasy_c.pdf"
+# Web Archive
+# niektore_materialy_na_swiadectwo_klasy_A_2019: "https://web.archive.org/web/20210615181613if_/https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/130/3/2/materialy_do_testu_na_swiadectwo_klasy_a.pdf"
+# niektore_materialy_na_swiadectwo_klasy_C_2019: "https://web.archive.org/web/20220906171513if_/https://bip.uke.gov.pl/download/gfx/bip/pl/defaultaktualnosci/130/3/2/materialy_do_testu_na_swiadectwo_klasy_c.pdf"
+
+# ================ 2008
+# Bardzo stare pytania egzaminacyjne.
+# Create Date: 2008:12:23
+pytania_na_swiadectwa_klasy_A_i_C_2008: "https://web.archive.org/web/20130729023118if_/http://www.uke.gov.pl/files/?id_plik=5047"

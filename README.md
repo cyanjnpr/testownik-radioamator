@@ -8,7 +8,7 @@ Repozytorium przeznaczone dla studentów PWr zainteresowanych zdobyciem uprawnie
 
 ## Wykorzystanie
 
-Baza może zostać wczytana do jednej z wielu wersji aplikacji testownik dostępnych online. 
+Baza może zostać zaimportowana do jednej z wielu wersji aplikacji testownik dostępnych online. 
 Przykładem może być [testownik Solvro](https://github.com/solvro/web-testownik) (Wymaga zalogowania do poprawnego zaimportowania quizu).
 
 ## Lokalizacja plików
