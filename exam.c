@@ -40,7 +40,9 @@ typedef struct {
   GString *answer2;
   GString *answer3;
   short int correct;
+  gboolean confidently_correct;
   gboolean has_image;
+  int image_count;
 } Question;
 
 typedef enum { UNKNOWN, QUESTION, ANSWER1, ANSWER2, ANSWER3 } TextPart;
@@ -91,23 +93,35 @@ gboolean is_question(int qx) {
   return FALSE;
 }
 
-gboolean is_close(int font_size, TextPart m, CharPos *p1) {
+gboolean is_paragraph_part(int font_size, TextPart m, CharPos *p1) {
+  static int paragraph_start = 0;
   static TextPart lm = UNKNOWN;
   static CharPos *lp = NULL;
   if (lp == NULL || m != lm) {
+    paragraph_start = p1->x1;
     lm = m;
     lp = p1;
     return TRUE;
   }
-  return (abs(p1->x1 - lp->x2) < font_size * 3 ||
-          abs(p1->y2 - lp->y2) < font_size * 3);
+  return ((abs(p1->x1 - paragraph_start) < font_size * 2 && p1->y2 > lp->y2) ||
+          (abs(p1->y2 - lp->y2) < font_size * 4 && p1->x2 > lp->x1));
+}
+
+void save_cropped_region(cairo_surface_t *source_surface, gchar *filename,
+                         int top_y, int bottom_y, int page_width) {
+  cairo_surface_t *crop = cairo_image_surface_create(
+      CAIRO_FORMAT_ARGB32, page_width, bottom_y - top_y);
+  cairo_t *cr = cairo_create(crop);
+  cairo_set_source_surface(cr, source_surface, 0, -top_y);
+  cairo_paint(cr);
+  cairo_destroy(cr);
+  cairo_surface_write_to_png(crop, filename);
+  cairo_surface_destroy(crop);
 }
 
 gboolean is_underlined_answer(cairo_surface_t *surface, CharPos a_pos) {
-
   int stride = cairo_image_surface_get_stride(surface);
   unsigned char *data = cairo_image_surface_get_data(surface);
-
   int min_width = (int)((a_pos.x2 - a_pos.x1) * 0.95);
 
   int y_h = a_pos.y2 - a_pos.y1;
@@ -310,6 +324,9 @@ int main(int argc, char **argv) {
   int current_question = 1;
   gdouble previous_font_size = 0;
 
+  int margin_top_y = INT32_MAX;
+  int margin_bottom_y = 0;
+
   for (int p = 0; p < page_count; p++) {
     PopplerPage *page = poppler_document_get_page(doc, p);
 
@@ -329,10 +346,9 @@ int main(int argc, char **argv) {
     poppler_page_get_size(page, &page_width, &page_height);
 
     double render_scale = 3;
-
     cairo_surface_t *surface = cairo_image_surface_create(
-        CAIRO_FORMAT_ARGB32, (int)page_width * render_scale,
-        (int)page_height * render_scale);
+        CAIRO_FORMAT_ARGB32, (int)(page_width * render_scale),
+        (int)(page_height * render_scale));
     cairo_t *cr = cairo_create(surface);
 
     cairo_set_source_rgb(cr, 1, 1, 1);
@@ -402,6 +418,11 @@ int main(int argc, char **argv) {
     gchar *gc = sorted->str;
     int ignore = 0;
     for (int i = 0; i < chars_total; i++) {
+      if (positions[i].y2 < margin_top_y)
+        margin_top_y = positions[i].y2;
+      if (positions[i].y2 > margin_bottom_y)
+        margin_bottom_y = positions[i].y2;
+
       if (previous_font_size < attributes[i].font_size &&
           attributes[i].is_bold && mode == ANSWER3) {
         // change of category
@@ -420,8 +441,9 @@ int main(int argc, char **argv) {
         arrput(exam, ((Question){arrlen(exam), positions[i], positions[i],
                                  positions[i], positions[i], g_string_new(""),
                                  g_string_new(""), g_string_new(""),
-                                 g_string_new(""), 0, FALSE}));
+                                 g_string_new(""), 0, FALSE, FALSE, 0}));
         ignore = (int)log10(current_question) + 2;
+        exam[arrlen(exam) - 1].q_pos.y1 = positions[i].y2;
         mode = QUESTION;
         current_question++;
       } else if ((g_str_has_prefix(gc, "a.") || g_str_has_prefix(gc, "A.")) &&
@@ -447,19 +469,26 @@ int main(int argc, char **argv) {
         int qi = arrlen(exam) - 1;
         switch (mode) {
         case QUESTION:
-          if (is_close(attributes[i].font_size, mode, &positions[i]))
+          if (is_paragraph_part(attributes[i].font_size, mode, &positions[i])) {
             g_string_append_len(exam[qi].question, cbuf, clen);
+            exam[qi].q_pos.y2 = positions[i].y2;
+          }
           break;
         case ANSWER1:
-          if (attributes[i].is_bold || attributes[i].is_underlined)
+          if (attributes[i].is_bold || attributes[i].is_underlined) {
             exam[qi].correct = 0b100;
-          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            exam[qi].confidently_correct = TRUE;
+          }
+          if (is_paragraph_part(attributes[i].font_size, mode, &positions[i])) {
             g_string_append_len(exam[qi].answer1, cbuf, clen);
             if (exam[qi].a1_pos.y2 == positions[i].y2) {
               exam[qi].a1_pos.x2 = positions[i].x2;
               // fallback, font doesn't carry information about underline,
-              // stroke is a separate pdf object
-              if (exam[qi].correct == 0 && strlen(exam[qi].answer1->str) >= 3 &&
+              // stroke is a separate pdf object.
+              // min number of characters is necessary to recognize the presence
+              // of underline, sacrifice short questions
+              if (!exam[qi].confidently_correct &&
+                  strlen(exam[qi].answer1->str) > 3 &&
                   is_underlined_answer(
                       surface, pos_scaled(exam[qi].a1_pos, render_scale))) {
                 exam[qi].correct = 0b100;
@@ -468,14 +497,17 @@ int main(int argc, char **argv) {
           }
           break;
         case ANSWER2:
-          if (attributes[i].is_bold || attributes[i].is_underlined)
+          if (attributes[i].is_bold || attributes[i].is_underlined) {
             exam[qi].correct = 0b010;
-          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            exam[qi].confidently_correct = TRUE;
+          }
+          if (is_paragraph_part(attributes[i].font_size, mode, &positions[i])) {
             g_string_append_len(exam[qi].answer2, cbuf, clen);
             if (exam[qi].a2_pos.y2 == positions[i].y2) {
               exam[qi].a2_pos.x2 = positions[i].x2;
 
-              if (exam[qi].correct == 0 && strlen(exam[qi].answer2->str) >= 3 &&
+              if (!exam[qi].confidently_correct &&
+                  strlen(exam[qi].answer2->str) > 3 &&
                   is_underlined_answer(
                       surface, pos_scaled(exam[qi].a2_pos, render_scale))) {
                 exam[qi].correct = 0b010;
@@ -484,14 +516,17 @@ int main(int argc, char **argv) {
           }
           break;
         case ANSWER3:
-          if (attributes[i].is_bold || attributes[i].is_underlined)
+          if (attributes[i].is_bold || attributes[i].is_underlined) {
             exam[qi].correct = 0b001;
-          if (is_close(attributes[i].font_size, mode, &positions[i])) {
+            exam[qi].confidently_correct = TRUE;
+          }
+          if (is_paragraph_part(attributes[i].font_size, mode, &positions[i])) {
             g_string_append_len(exam[qi].answer3, cbuf, clen);
             if (exam[qi].a3_pos.y2 == positions[i].y2) {
               exam[qi].a3_pos.x2 = positions[i].x2;
 
-              if (exam[qi].correct == 0 && strlen(exam[qi].answer3->str) >= 3 &&
+              if (!exam[qi].confidently_correct &&
+                  strlen(exam[qi].answer3->str) > 3 &&
                   is_underlined_answer(
                       surface, pos_scaled(exam[qi].a3_pos, render_scale))) {
                 exam[qi].correct = 0b001;
@@ -517,19 +552,23 @@ int main(int argc, char **argv) {
       int img_question = 0;
       for (int i = page_first_qi; i < arrlen(exam); i++) {
         if (i == page_first_qi) {
-          if (exam[i].q_pos.y2 > iy) {
+          if (exam[i].q_pos.y1 > iy) {
             if (i > 0) {
-              exam[i - 1].has_image = TRUE;
+              exam[i - 1].image_count++;
+              // if image is made up of a few smaller images, extract it later as a screenshot
+              exam[i - 1].has_image = exam[i - 1].image_count == 1;
               img_question = exam[i - 1].number;
               break;
             }
           }
-        } else if (exam[i - 1].q_pos.y2 < iy && exam[i].q_pos.y2 > iy) {
-          exam[i - 1].has_image = TRUE;
+        } else if (exam[i - 1].q_pos.y1 < iy && exam[i].q_pos.y1 > iy) {
+          exam[i - 1].image_count++;
+          exam[i - 1].has_image = exam[i - 1].image_count == 1;
           img_question = exam[i - 1].number;
           break;
-        } else if (i == arrlen(exam) - 1 && exam[i].q_pos.y2 < iy) {
-          exam[i].has_image = TRUE;
+        } else if (i == arrlen(exam) - 1 && exam[i].q_pos.y1 < iy) {
+          exam[i].image_count++;
+          exam[i].has_image = exam[i].image_count == 1;
           img_question = exam[i].number;
         }
       }
@@ -542,6 +581,54 @@ int main(int argc, char **argv) {
         cairo_surface_destroy(img);
         g_free(filename);
         g_free(name);
+      }
+    }
+
+    // figures made up of strokes and shapes
+    for (int i = fmax(page_first_qi - 1, 0); i < arrlen(exam); i++) {
+      Question q = exam[i];
+      if (!q.has_image) {
+        if (i == page_first_qi - 1) {
+          if (exam[i].q_pos.y2 > exam[i].a1_pos.y2 &&
+              exam[i].a1_pos.y2 - margin_top_y > previous_font_size * 3) {
+            exam[i].has_image = TRUE;
+            exam[i].image_count++;
+            gchar *name = g_strdup_printf("%03d.png", exam[i].number);
+            gchar *filename = g_build_filename(exam_dir, name, NULL);
+            save_cropped_region(surface, filename, margin_top_y * render_scale,
+                                q.a1_pos.y1 * render_scale,
+                                (int)page_width * render_scale);
+            g_free(filename);
+            g_free(name);
+          } else if (exam[i].q_pos.y2 > exam[i].a1_pos.y2 &&
+                     margin_bottom_y - exam[i].q_pos.y2 >
+                         previous_font_size * 3) {
+            exam[i].has_image = TRUE;
+          }
+        } else if (q.q_pos.y2 < q.a1_pos.y2 &&
+                   q.a1_pos.y2 - q.q_pos.y2 > previous_font_size * 3) {
+          exam[i].has_image = TRUE;
+          exam[i].image_count++;
+          gchar *name = g_strdup_printf("%03d.png", q.number);
+          gchar *filename = g_build_filename(exam_dir, name, NULL);
+          save_cropped_region(surface, filename, q.q_pos.y1 * render_scale,
+                              q.a1_pos.y1 * render_scale,
+                              (int)page_width * render_scale);
+          g_free(filename);
+          g_free(name);
+        } else if (i == arrlen(exam) - 1 &&
+                   exam[i].q_pos.y2 > exam[i].a1_pos.y2 &&
+                   margin_bottom_y - exam[i].q_pos.y2 >
+                       previous_font_size * 3) {
+          exam[i].image_count++;
+          gchar *name = g_strdup_printf("%03d.png", exam[i].number);
+          gchar *filename = g_build_filename(exam_dir, name, NULL);
+          save_cropped_region(surface, filename, q.q_pos.y1 * render_scale,
+                              margin_bottom_y * render_scale,
+                              (int)page_width * render_scale);
+          g_free(filename);
+          g_free(name);
+        }
       }
     }
 
@@ -621,7 +708,7 @@ int main(int argc, char **argv) {
     gchar *name = g_strdup_printf("%03d.txt", q.number);
     gchar *filename = g_build_filename(exam_dir, name, NULL);
 
-    if (q.has_image) {
+    if (q.image_count > 0) {
       gchar *name = g_strdup_printf("%03d.png", q.number);
       gchar *filename = g_build_filename(exam_dir, name, NULL);
       g_unlink(filename);
